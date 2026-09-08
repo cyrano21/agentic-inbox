@@ -164,6 +164,10 @@ const api = {
 	// Supplier contacts (carnet)
 	listSupplierContacts: (mailboxId: string) =>
 		get<SupplierContact[]>(`/api/v1/mailboxes/${mailboxId}/supplier-contacts`),
+	setSupplierContactStatus: (mailboxId: string, email: string, status: string) =>
+		put<{ ok: boolean }>(`/api/v1/mailboxes/${mailboxId}/supplier-contacts/${encodeURIComponent(email)}/status`, { status }),
+	requestSupplierDraft: (mailboxId: string, email: string, emailId: string) =>
+		post<{ status: string }>(`/api/v1/mailboxes/${mailboxId}/supplier-contacts/${encodeURIComponent(email)}/request-draft`, { emailId }),
 };
 
 export default api;

@@ -21,6 +21,8 @@ export const queryKeys = {
 	},
 	supplierContacts: {
 		list: (mailboxId: string) => ["supplier-contacts", mailboxId] as const,
+		detail: (mailboxId: string, email: string) =>
+			["supplier-contacts", mailboxId, email] as const,
 	},
 	search: {
 		results: (mailboxId: string, query: string, page: number) =>

@@ -381,6 +381,41 @@ app.post("/api/v1/mailboxes/:mailboxId/supplier-contacts", async (c: AppContext)
 	return c.json(result, 201);
 });
 
+app.put("/api/v1/mailboxes/:mailboxId/supplier-contacts/:email/status", async (c: AppContext) => {
+	const email = decodeURIComponent(c.req.param("email")!);
+	const { status } = await c.req.json().catch(() => ({ status: undefined }));
+	const result = await c.var.mailboxStub.setSupplierContactStatus(email, String(status || ""));
+	if (!result.ok) return c.json({ error: result.reason }, 400);
+	return c.json(result);
+});
+
+app.post("/api/v1/mailboxes/:mailboxId/supplier-contacts/:email/request-draft", async (c: AppContext) => {
+	const email = decodeURIComponent(c.req.param("email")!);
+	const { emailId } = await c.req.json().catch(() => ({ emailId: undefined }));
+	if (!emailId) return c.json({ error: "emailId required" }, 400);
+	const mailboxId = c.req.param("mailboxId")!;
+	const stub = c.var.mailboxStub;
+	const full = (await stub.getEmail(emailId)) as { sender?: string; subject?: string; thread_id?: string } | null;
+	if (!full) return c.json({ error: "email not found" }, 404);
+	if ((full.sender || "").toLowerCase() !== email.toLowerCase()) {
+		return c.json({ error: "email does not belong to this contact" }, 400);
+	}
+	const agentStub = c.env.EMAIL_AGENT.get(c.env.EMAIL_AGENT.idFromName(mailboxId));
+	const resp = await agentStub.fetch(new Request("https://agents/requestDraft", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			mailboxId,
+			emailId,
+			sender: (full.sender || email).toLowerCase(),
+			subject: full.subject || "",
+			threadId: full.thread_id || emailId,
+		}),
+	}));
+	const result = await resp.json().catch(() => ({ error: "agent unreachable" }));
+	return c.json(result as Record<string, unknown>, resp.status === 200 ? 200 : (resp.status as 500));
+});
+
 // -- Attachments ----------------------------------------------------
 
 app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId/attachments/:attachmentId", async (c: AppContext) => {

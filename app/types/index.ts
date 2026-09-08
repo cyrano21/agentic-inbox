@@ -73,4 +73,6 @@ export interface SupplierContact {
 	email_count: number;
 	last_folder: string | null;
 	last_subject: string | null;
+	status: string;
+	recent_emails?: Array<{ id: string; subject: string | null; date: string | null; read: boolean }>;
 }

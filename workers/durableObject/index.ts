@@ -615,19 +615,70 @@ export class MailboxDO extends DurableObject<Env> {
 
 	/**
 	 * [Carnet fournisseurs] List all known supplier contacts, most recent first.
+	 * Each contact embeds its last 3 exchanges (from the supplier only) for the
+	 * expandable history in the UI.
 	 */
 	async getSupplierContacts() {
-		return [
+		type SupplierRow = {
+			email: string;
+			name: string | null;
+			first_seen: string;
+			last_seen: string;
+			email_count: number;
+			last_folder: string | null;
+			last_subject: string | null;
+			status: string;				recent_emails: Array<{ id: string; subject: string | null; date: string | null; read: boolean }>;
+		};
+		const rows: SupplierRow[] = [
 			...this.ctx.storage.sql
 				.exec(
-					`SELECT email, name, first_seen, last_seen, email_count, last_folder, last_subject
+					`SELECT email, name, first_seen, last_seen, email_count, last_folder, last_subject, status
 					 FROM supplier_contacts ORDER BY last_seen DESC`,
 				)
 				.raw(),
 		].map((r: any[]) => ({
 			email: r[0], name: r[1], first_seen: r[2], last_seen: r[3],
-			email_count: r[4], last_folder: r[5], last_subject: r[6],
+			email_count: r[4], last_folder: r[5], last_subject: r[6], status: r[7] || "actif",
+			recent_emails: [],
 		}));
+		// Embed last 3 supplier-sent emails per contact (bounded: one query per
+		// contact, contacts are few dozens at most).
+		for (const c of rows) {
+			try {
+				const recent = this.db
+					.select({
+						id: schema.emails.id,
+						subject: schema.emails.subject,
+						date: schema.emails.date,
+						read: schema.emails.read,
+					})
+					.from(schema.emails)
+					.where(eq(schema.emails.sender, c.email))
+					.orderBy(desc(schema.emails.date))
+					.limit(3)
+					.all();
+				c.recent_emails = recent.map((e) => ({ ...e, read: !!e.read }));
+			} catch {
+				c.recent_emails = [];
+			}
+		}
+		return rows;
+	}
+
+	/**
+	 * [Carnet fournisseurs] Update the workflow status of a supplier contact.
+	 */
+	async setSupplierContactStatus(email: string, status: string) {
+		const normalized = String(email || "").toLowerCase().trim();
+		const allowed = ["actif", "negociation", "dormant"];
+		if (!normalized || !allowed.includes(status)) {
+			return { ok: false, reason: "invalid email or status" };
+		}
+		this.ctx.storage.sql.exec(
+			`UPDATE supplier_contacts SET status = ?1 WHERE email = ?2`,
+			status, normalized,
+		);
+		return { ok: true };
 	}
 
 	async createFolder(id: string, name: string, is_deletable: number = 1) {

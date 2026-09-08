@@ -394,6 +394,29 @@ export class EmailAgent extends AIChatAgent<any> {
 				);
 			}
 		}
+		// [Carnet fournisseurs] On-demand draft: the contacts-book UI asks the
+		// agent to prepare a reply to a given email (same engine as auto-draft).
+		if (url.pathname.endsWith("/requestDraft") && request.method === "POST") {
+			try {
+				const emailData = await request.json() as {
+					mailboxId: string;
+					emailId: string;
+					sender: string;
+					subject: string;
+					threadId: string;
+				};
+				const result = await this.handleNewEmail(emailData);
+				return new Response(JSON.stringify(result), {
+					headers: { "Content-Type": "application/json" },
+				});
+			} catch (e) {
+				console.error("requestDraft handler failed:", (e as Error).message);
+				return new Response(
+					JSON.stringify({ error: (e as Error).message }),
+					{ status: 500, headers: { "Content-Type": "application/json" } },
+				);
+			}
+		}
 		return super.onRequest(request);
 	}
 

@@ -64,3 +64,13 @@ export interface Folder {
 	name: string;
 	unreadCount: number;
 }
+
+export interface SupplierContact {
+	email: string;
+	name: string | null;
+	first_seen: string;
+	last_seen: string;
+	email_count: number;
+	last_folder: string | null;
+	last_subject: string | null;
+}

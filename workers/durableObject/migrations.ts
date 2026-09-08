@@ -158,6 +158,20 @@ export const mailboxMigrations: Migration[] = [
         `),
 	},
 	{
+		name: "9_add_supplier_contacts",
+		sql: txn(`
+            CREATE TABLE IF NOT EXISTS supplier_contacts (
+                email TEXT PRIMARY KEY,
+                name TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                email_count INTEGER NOT NULL DEFAULT 1,
+                last_folder TEXT,
+                last_subject TEXT
+            );
+        `),
+	},
+	{
 		// No txn() wrapper: Cloudflare's DO runtime requires state.storage.transactionSync()
 		// instead of SQL-level BEGIN TRANSACTION. These are idempotent CREATE INDEX IF NOT EXISTS
 		// statements so they're safe to run without a transaction.

@@ -586,6 +586,50 @@ export class MailboxDO extends DurableObject<Env> {
 		return result;
 	}
 
+	/**
+	 * [Carnet fournisseurs] Record/refresh a supplier contact entry.
+	 * Called automatically when a supplier email is stored.
+	 */
+	async upsertSupplierContact(contact: {
+		email: string;
+		name?: string | null;
+		last_folder?: string | null;
+		last_subject?: string | null;
+	}) {
+		const email = String(contact.email || "").toLowerCase().trim();
+		if (!email || !email.includes("@")) return { ok: false, reason: "invalid email" };
+		const now = new Date().toISOString();
+		this.ctx.storage.sql.exec(
+			`INSERT INTO supplier_contacts (email, name, first_seen, last_seen, email_count, last_folder, last_subject)
+			 VALUES (?1, ?2, ?3, ?3, 1, ?4, ?5)
+			 ON CONFLICT(email) DO UPDATE SET
+			   name = COALESCE(excluded.name, name),
+			   last_seen = excluded.last_seen,
+			   email_count = email_count + 1,
+			   last_folder = COALESCE(excluded.last_folder, last_folder),
+			   last_subject = COALESCE(excluded.last_subject, last_subject)`,
+			email, contact.name || null, now, contact.last_folder || null, contact.last_subject || null,
+		);
+		return { ok: true };
+	}
+
+	/**
+	 * [Carnet fournisseurs] List all known supplier contacts, most recent first.
+	 */
+	async getSupplierContacts() {
+		return [
+			...this.ctx.storage.sql
+				.exec(
+					`SELECT email, name, first_seen, last_seen, email_count, last_folder, last_subject
+					 FROM supplier_contacts ORDER BY last_seen DESC`,
+				)
+				.raw(),
+		].map((r: any[]) => ({
+			email: r[0], name: r[1], first_seen: r[2], last_seen: r[3],
+			email_count: r[4], last_folder: r[5], last_subject: r[6],
+		}));
+	}
+
 	async createFolder(id: string, name: string, is_deletable: number = 1) {
 		try {
 			const result = this.db

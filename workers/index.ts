@@ -368,11 +368,23 @@ app.get("/api/v1/mailboxes/:mailboxId/search", async (c: AppContext) => {
 	return c.json({ emails, totalCount });
 });
 
+// -- Carnet fournisseurs --------------------------------------------
+
+app.get("/api/v1/mailboxes/:mailboxId/supplier-contacts", async (c: AppContext) => {
+	return c.json(await c.var.mailboxStub.getSupplierContacts());
+});
+
+app.post("/api/v1/mailboxes/:mailboxId/supplier-contacts", async (c: AppContext) => {
+	const body = await c.req.json().catch(() => ({}));
+	const result = await c.var.mailboxStub.upsertSupplierContact(body as any);
+	if (!result.ok) return c.json({ error: result.reason }, 400);
+	return c.json(result, 201);
+});
+
 // -- Attachments ----------------------------------------------------
 
 app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId/attachments/:attachmentId", async (c: AppContext) => {
-	const emailId = c.req.param("emailId")!;
-	const attachmentId = c.req.param("attachmentId")!;
+	const { emailId, attachmentId } = c.req.param();
 	const attachment = await c.var.mailboxStub.getAttachment(attachmentId);
 	if (!attachment) return c.json({ error: "Attachment not found" }, 404);
 	const obj = await c.env.BUCKET.get(`attachments/${emailId}/${attachmentId}/${attachment.filename}`);
@@ -525,10 +537,26 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		throw storeErr;
 	}
 
+	// [Carnet fournisseurs] Track supplier contacts when a supplier email lands.
+	if (targetFolder === "fournisseurs") {
+		try {
+			await retryOnDoReset(() => (stub as any).upsertSupplierContact({
+				email: fromAddress,
+				name: parsedEmail.from?.name || null,
+				last_folder: targetFolder,
+				last_subject: parsedEmail.subject || null,
+			}));
+		} catch (e) {
+			console.warn("Supplier contact upsert failed:", (e as Error).message);
+		}
+	}
+
 	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
 	if (targetFolder !== Folders.INBOX) {
 		// Newsletters / notifications : pas de brouillon automatique de l'agent.
-		return;
+		// Les fournisseurs, SI : le brouillon auto prépare la réponse business
+		// dans le bon fil avant même que Louis ouvre l'app.
+		if (targetFolder !== "fournisseurs") return;
 	}
 	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 		method: "POST", headers: { "Content-Type": "application/json" },

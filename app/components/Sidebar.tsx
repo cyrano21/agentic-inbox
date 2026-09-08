@@ -13,6 +13,7 @@ import {
 	PlusIcon,
 	TrashIcon,
 	TrayIcon,
+	UsersIcon,
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router";
@@ -221,6 +222,21 @@ export default function Sidebar() {
 						</div>
 					</div>
 				)}
+
+				{/* Carnet fournisseurs */}
+				<div className="pt-5">
+					<div className="px-3 mb-1.5">
+						<span className="text-xs uppercase tracking-wider font-semibold text-kumo-subtle">
+							Business
+						</span>
+					</div>
+					<FolderLink
+						to={`/mailbox/${mailboxId}/supplier-contacts`}
+						icon={<UsersIcon size={18} />}
+						label="Carnet fournisseurs"
+						onClick={handleNavClick}
+					/>
+				</div>
 			</nav>
 
 			{/* Create folder dialog */}

@@ -135,7 +135,7 @@ export async function toolSearchEmails(
 	if (!Array.isArray(results) || results.length === 0) {
 		return {
 			count: 0,
-			note: `No emails match the query '${params.query}'${params.folder ? ` in folder '${params.folder}'` : ""}. Report this to the user — do NOT retry with the same arguments.`,
+			note: `No emails match the query '${params.query}'${params.folder ? ` in folder '${params.folder}'` : " in any folder"}. Report this to the user — do NOT retry with the same arguments.`,
 		};
 	}
 	return { count: results.length, emails: results.map(compactEmailForModel) };

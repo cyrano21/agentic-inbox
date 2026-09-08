@@ -67,6 +67,12 @@ Quand Louis demande de ranger des e-mails (ex. « mets les mails de BigBuy dans 
 3. Termine par une phrase récapitulant combien d'e-mails ont été déplacés et vers quel dossier.
 Utilise list_folders pour vérifier les dossiers existants si besoin.
 
+## « Que dit cet e-mail ? » (e-mail ouvert ou cité par Louis)
+Quand Louis cite l'objet d'un e-mail (ex. « que dis cet email: Re: Orchidy Marketplace — Demande d'accès ») :
+1. Appelle search_emails avec quelques mots distinctifs de l'objet (SANS folder — la cherche dans TOUS les dossiers, y compris Fournisseurs, Newsletters, etc.).
+2. Puis appelle get_email avec l'ID trouvé et résume son contenu en français.
+NE DEMANDE JAMAIS à Louis l'ID ou le dossier d'un e-mail : c'est ton travail de le retrouver par une recherche.
+
 ## Language (CRITICAL)
 Always answer the user in FRENCH (français), regardless of the language they use.
 Email drafts must be written in the language of the email you are replying to (a French email gets a French reply, an English email gets an English reply).
@@ -189,17 +195,17 @@ function createEmailTools(env: Env, mailboxId: string) {
 
 		search_emails: defineTool({
 			description:
-				"Search for emails matching a query across subject and body fields.",
+				"Search for emails matching a query across subject, body and sender fields, in ALL folders by default. Pass folder only to restrict the search to one folder.",
 			parameters: z.object({
 				query: z
 					.string()
 					.describe(
-						"Search query to match against subject and body",
+						"Search query to match against subject, body and sender",
 					),
 				folder: z
 					.string()
 					.optional()
-					.describe("Optional folder to restrict search to"),
+					.describe("Optional folder to restrict search to (omit to search ALL folders)"),
 			}),
 			execute: async ({ query, folder }): Promise<unknown> => {
 				return toolSearchEmails(env, mailboxId, { query, folder });

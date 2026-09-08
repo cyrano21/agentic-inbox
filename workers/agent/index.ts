@@ -29,6 +29,7 @@ import {
 	toolDraftEmail,
 	toolMarkEmailRead,
 	toolMoveEmail,
+	toolMoveEmails,
 	toolDiscardDraft,
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
@@ -62,7 +63,7 @@ Pour un résumé des non-lus : liste expéditeur + objet + 1 ligne de résumé p
 ## Organisation des e-mails
 Quand Louis demande de ranger des e-mails (ex. « mets les mails de BigBuy dans un dossier Fournisseurs »), PROCÉDURE OBLIGATOIRE :
 1. Appelle d'abord list_emails (inbox) et/ou search_emails avec le nom de l'expéditeur pour trouver les e-mails concernés. NE RÉPONDS JAMAIS « aucun e-mail trouvé » sans avoir réellement listé ou cherché au préalable.
-2. Appelle ensuite move_email pour CHAQUE e-mail trouvé. Les dossiers personnalisés sont créés automatiquement s'ils n'existent pas — ne dis jamais que tu ne peux pas créer un dossier.
+2. Appelle ensuite move_emails (batch, PRÉFÉRÉ — un seul appel avec tous les IDs) ou move_email pour chaque e-mail trouvé. Les dossiers personnalisés sont créés automatiquement s'ils n'existent pas — ne dis jamais que tu ne peux pas créer un dossier.
 3. Termine par une phrase récapitulant combien d'e-mails ont été déplacés et vers quel dossier.
 Utilise list_folders pour vérifier les dossiers existants si besoin.
 
@@ -279,6 +280,23 @@ function createEmailTools(env: Env, mailboxId: string) {
 			}),
 			execute: async ({ emailId, folderId }): Promise<unknown> => {
 				return toolMoveEmail(env, mailboxId, emailId, folderId);
+			},
+		}),
+
+		move_emails: defineTool({
+			description:
+				"Move MULTIPLE emails to the same folder in one call. PREFERRED over repeated move_email calls when filing several emails (e.g. all emails from a supplier into a custom folder). Pass the exact email IDs from the search/list results.",
+			parameters: z.object({
+				emailIds: z
+					.array(z.string())
+					.min(1)
+					.describe("Array of email IDs to move (exact IDs from list_emails/search_emails results)"),
+				folderId: z
+					.string()
+					.describe(MOVE_FOLDER_TOOL_DESCRIPTION),
+			}),
+			execute: async ({ emailIds, folderId }): Promise<unknown> => {
+				return toolMoveEmails(env, mailboxId, emailIds, folderId);
 			},
 		}),
 

@@ -25,13 +25,14 @@
 		// NOTE: Kimi K2.x / GLM-5.x flagship are PAID-tier on Workers AI (AiError 5035 on
 		// the Free plan). Primary model = free tier; llm.ts falls back automatically if
 		// availability changes. Switch back to @cf/moonshotai/kimi-k2.5 after upgrading.
-		// gpt-oss-20b is a reasoning model: after large tool results it could end its
-		// turn inside the reasoning channel without emitting text — mitigated by the
-		// compacted tool results in tools.ts + maxOutputTokens 8192. (Observed in
-		// prod: llama-3.3 passes placeholder strings as tool args; glm-4.7 also fine
-		// but keep gpt-oss primary — proven longest here. Daily free-tier quota can
-		// make ALL models report "unavailable" until it resets.)
-		"LLM_WORKERS_AI_MODEL": "@cf/openai/gpt-oss-20b",
+		// Model choice history (all observed in prod):
+		// - gpt-oss-20b: reasoning model — after large tool results it can end its
+		//   turn inside the reasoning channel without emitting text or follow-up
+		//   tool calls (unfixable from provider options; no reasoning_effort knob).
+		// - llama-3.3-70b: passes placeholder strings as tool args.
+		// - glm-4.7-flash: agentic-tuned, reliable tool→text continuation. PRIMARY.
+		// Note: daily free-tier quota can make ALL models report "unavailable".
+		"LLM_WORKERS_AI_MODEL": "@cf/zai-org/glm-4.7-flash",
 		"SUMMARY_TO": "louiscyrano@gmail.com"
 	},
 	"triggers": {

@@ -411,6 +411,43 @@ export async function toolMoveEmail(
 	return { error: "Failed to move email" };
 }
 
+// ── move_emails (batch) ────────────────────────────────────────────
+
+/**
+ * Move several emails to the same folder in one call. Prefer this over N
+ * individual move_email calls: fewer agent steps, one folder-ensure.
+ */
+export async function toolMoveEmails(
+	env: Env,
+	mailboxId: string,
+	emailIds: string[],
+	folderId: string,
+) {
+	const stub = getMailboxStub(env, mailboxId);
+	const raw = folderId.trim();
+	const slug = slugifyFolderName(raw);
+	if (!slug) {
+		return { error: "Invalid folder name (must contain alphanumeric characters)" };
+	}
+	if (!Array.isArray(emailIds) || emailIds.length === 0) {
+		return { error: "emailIds must be a non-empty array of email IDs" };
+	}
+
+	// Custom folders are auto-created on first use (e.g. "Fournisseurs").
+	const folders = await stub.getFolders();
+	if (!folders.some((f) => f.id === slug)) {
+		await stub.createFolder(slug, raw, 1);
+	}
+
+	const moved: string[] = [];
+	const failed: string[] = [];
+	for (const id of emailIds) {
+		if (await stub.moveEmail(id, slug)) moved.push(id);
+		else failed.push(id);
+	}
+	return { status: "moved", folder: slug, movedCount: moved.length, moved, failed };
+}
+
 // ── discard_draft ──────────────────────────────────────────────────
 
 export async function toolDiscardDraft(

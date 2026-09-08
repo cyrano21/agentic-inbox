@@ -20,6 +20,7 @@ import {
 	toolMarkEmailRead,
 	toolListFolders,
 	toolMoveEmail,
+	toolMoveEmails,
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
@@ -442,6 +443,28 @@ export class EmailMCP extends McpAgent<Env> {
 						isError: true,
 					};
 				}
+				return mcpText(result);
+			},
+		);
+
+		// ── move_emails (batch) ────────────────────────────────────
+		this.server.tool(
+			"move_emails",
+			"Move MULTIPLE emails to the same folder in one call. PREFERRED over repeated move_email calls when filing several emails (e.g. all emails from a supplier into a custom folder). Pass the exact email IDs from the search/list results.",
+			{
+				mailboxId: z.string().describe("The mailbox email address"),
+				emailIds: z
+					.array(z.string())
+					.min(1)
+					.describe("Array of email IDs to move (exact IDs from list_emails/search_emails results)"),
+				folderId: z
+					.string()
+					.describe(MOVE_FOLDER_TOOL_DESCRIPTION),
+			},
+			async ({ mailboxId, emailIds, folderId }) => {
+				const denied = await verifyMailbox(mailboxId);
+				if (denied) return denied;
+				const result = await toolMoveEmails(env, mailboxId, emailIds, folderId);
 				return mcpText(result);
 			},
 		);

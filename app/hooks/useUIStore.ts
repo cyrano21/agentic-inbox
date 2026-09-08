@@ -12,6 +12,12 @@ export interface ComposeOptions {
 	originalEmail?: Email | null;
 	/** When editing a draft, this holds the draft email to pre-fill the composer */
 	draftEmail?: Email | null;
+	/** Prefilled fields for a fresh message (e.g. « Répondre » from the supplier contacts book) */
+	prefill?: {
+		to?: string;
+		subject?: string;
+		body?: string;
+	};
 }
 
 interface UIState {

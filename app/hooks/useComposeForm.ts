@@ -109,7 +109,16 @@ function buildInitialComposeFields(
 	mailboxEmail: string | undefined,
 	sigBlock: string,
 ): ComposeFormFields {
-	const { draftEmail: draft, originalEmail: original, mode } = composeOptions;
+	const { draftEmail: draft, originalEmail: original, mode, prefill } = composeOptions;
+
+	if (prefill) {
+		return {
+			...EMPTY_FIELDS,
+			to: prefill.to || "",
+			subject: prefill.subject || "",
+			body: `${prefill.body ? `<p>${escapeHtml(prefill.body).replace(/\n/g, "<br>")}</p>` : ""}<p><br></p>${sigBlock}`,
+		};
+	}
 
 	if (draft) {
 		return {

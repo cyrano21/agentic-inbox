@@ -1,0 +1,444 @@
+{
+  "name": "📧 Alerte fournisseurs — Orchidy",
+  "active": true,
+  "nodes": [
+    {
+      "id": "a1-schedule",
+      "name": "Toutes les 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -400,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a2-fetch",
+      "name": "Lire la boîte",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -180,
+        0
+      ],
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails?folder=fournisseurs&page=1&limit=25&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "a3-filter",
+      "name": "Filtrer fournisseurs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Filtrer les NOUVEAUX emails fournisseurs non lus (mémoire anti-doublon)\nconst seen = $getWorkflowStaticData('global');\nseen.notified = seen.notified || {};\nconst data = $input.first().json;\nlet arr = Array.isArray(data) ? data : (data.emails || data.threads || data.result || []);\nlet flat = [];\nfor (const t of arr) {\n  if (Array.isArray(t && t.messages)) flat.push(...t.messages);\n  else flat.push(t);\n}\n// Les mails viennent déjà du dossier 'fournisseurs' (tri auto côté app).\n// On filtre quand même pour la mémoire anti-doublon.\nconst SUPPLIERS = /./;\nconst out = [];\nfor (const e of flat) {\n  const id = String(e.id || e.email_id || e.message_id || '');\n  const sender = String(e.sender || e.from || '');\n  const unread = (e.read === false || e.read === 0 || e.is_read === false);\n  if (!id || seen.notified[id]) continue;\n  if (!unread) continue;\n  if (!SUPPLIERS.test(sender) && !SUPPLIERS.test(String(e.subject || ''))) continue;\n  seen.notified[id] = true;\n  out.push({\n    json: {\n      to: 'louiscyrano@gmail.com',\n      subject: '\\ud83d\\udce7 Fournisseur : ' + (e.subject || '(sans objet)').slice(0, 90),\n      text: 'Nouvel email fournisseur de ' + (sender || '?') + '\\n\\nSujet : ' + (e.subject || '') + '\\n\\n\\u2192 R\\u00e9ponds dans l\\'app : https://agentic-inbox.louiscyrano.workers.dev'\n    }\n  });\n}\n// garder la map sous une taille raisonnable\nconst keys = Object.keys(seen.notified);\nif (keys.length > 2000) { for (const k of keys.slice(0, 1000)) delete seen.notified[k]; }\nreturn out;"
+      }
+    },
+    {
+      "id": "a4-notify",
+      "name": "M'alerter sur Gmail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'louis@orchidy.fr', to: $json.to, subject: $json.subject, text: $json.text }) }}",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "b1-fetch-sent",
+      "name": "Lire Envoyés",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        220
+      ],
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails?folder=sent&page=1&limit=50&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "b2-detect",
+      "name": "Détecter relances 3 jours",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        220
+      ],
+      "parameters": {
+        "jsCode": "// Relance si un email fournisseur n'a eu AUCUNE réponse de notre part depuis > 72h\nconst seen = $getWorkflowStaticData('global');\nseen.followup = seen.followup || {};\n\nfunction parseList(data) {\n  let arr = Array.isArray(data) ? data : (data.emails || data.threads || data.result || []);\n  let flat = [];\n  for (const t of arr) {\n    if (Array.isArray(t && t.messages)) flat.push(...t.messages);\n    else flat.push(t);\n  }\n  return flat;\n}\nfunction get(obj, keys) { for (const k of keys) { if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k]; } return undefined; }\nfunction domainOf(addr) {\n  const m = String(addr || '').match(/@([A-Za-z0-9.-]+)/);\n  return m ? m[1].toLowerCase() : '';\n}\nfunction dateOf(e) {\n  const v = get(e, ['date', 'received_at', 'created_at', 'receivedAt', 'sentAt']);\n  if (!v) return null;\n  const d = new Date(v);\n  return isNaN(d.getTime()) ? null : d;\n}\n\nconst inbox = parseList($('Lire la boîte').first().json);\nconst sent = parseList($input.first().json);\nconst SUPPLIERS = /prodigi|bigbuy|affliae|brickzone|imou|orderchimp|luzha|marketplace/i;\nconst now = Date.now();\nconst LIMIT = 72 * 3600 * 1000; // 3 jours\n\n// index des envois : domaine destinataire -> date du dernier envoi\nconst lastSentTo = {};\nfor (const s of sent) {\n  const d = dateOf(s);\n  if (!d) continue;\n  let tos = get(s, ['to', 'recipients']) || [];\n  if (typeof tos === 'string') tos = [tos];\n  for (const t of (Array.isArray(tos) ? tos : [])) {\n    const addr = typeof t === 'string' ? t : (t.email || t.address || '');\n    const dom = domainOf(addr);\n    if (!dom) continue;\n    if (!lastSentTo[dom] || d.getTime() > lastSentTo[dom]) lastSentTo[dom] = d.getTime();\n  }\n}\n\nconst out = [];\nfor (const e of inbox) {\n  const sender = String(get(e, ['sender', 'from']) || '');\n  const dom = domainOf(sender);\n  const id = String(get(e, ['id', 'email_id', 'message_id']) || '');\n  if (!id || seen.followup[id]) continue;\n  if (!SUPPLIERS.test(sender) && !SUPPLIERS.test(String(e.subject || ''))) continue;\n  const d = dateOf(e);\n  if (!d) continue;\n  const age = now - d.getTime();\n  if (age < LIMIT) continue;                       // trop récent\n  const replied = lastSentTo[dom] && lastSentTo[dom] > d.getTime();\n  if (replied) continue;                            // déjà répondu après son email\n  seen.followup[id] = true;\n  const jours = Math.floor(age / 86400000);\n  out.push({\n    json: {\n      to: 'louiscyrano@gmail.com',\n      subject: '⏰ Relance à faire : ' + String(e.subject || '(sans objet)').slice(0, 90),\n      text: 'Email de ' + sender + ' sans réponse depuis ' + jours + ' jours (reçu le ' + d.toLocaleDateString('fr-FR') + ').\\n\\n→ Réponds dans l\\u2019app : https://agentic-inbox.louiscyrano.workers.dev\\n(ou demande à ton agent IA : « rédige une relance pour ' + dom + ' »)'\n    }\n  });\n}\n// taille mémoire bornée\nconst keys = Object.keys(seen.followup);\nif (keys.length > 2000) { for (const k of keys.slice(0, 1000)) delete seen.followup[k]; }\nreturn out;"
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails?folder=inbox&page=1&limit=50&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-read-inbox-raw",
+      "name": "Lire Inbox brute",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Auto-classement : déplace les emails fournisseurs restés dans l'inbox vers 'fournisseurs'\nconst seen = $getWorkflowStaticData('global');\nseen.moved = seen.moved || {};\nconst data = $input.first().json;\nlet arr = Array.isArray(data) ? data : (data.emails || data.threads || data.result || []);\nlet flat = [];\nfor (const t of arr) { if (Array.isArray(t && t.messages)) flat.push(...t.messages); else flat.push(t); }\nconst SUPPLIERS = /prodigi|bigbuy|affilae|brickzone|orderchimp|imou|awin/i;\nconst out = [];\nfor (const e of flat) {\n  const id = String(e.id || '');\n  const sender = String(e.sender || e.from || '');\n  const folder = String(e.folder_id || e.folder || 'inbox');\n  if (!id || folder === 'fournisseurs') continue;\n  if (!SUPPLIERS.test(sender)) continue;\n  if (seen.moved[id]) continue;\n  out.push({ json: { emailId: id, sender } });\n  seen.moved[id] = Date.now();\n}\n// purge mémoire > 7 jours\nconst week = 7*24*3600*1000;\nfor (const k of Object.keys(seen.moved)) if (Date.now() - seen.moved[k] > week) delete seen.moved[k];\nreturn out;"
+      },
+      "id": "node-autofile-filter",
+      "name": "Détecter fournisseurs à classer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails/{{ $json.emailId }}/move",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folderId: 'Fournisseurs' }) }}",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-move-to-fournisseurs",
+      "name": "Déplacer vers Fournisseurs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        60,
+        220
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/olivier@orchidy.fr/emails?folder=fournisseurs&page=1&limit=25&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n-alerte-read-olivier",
+      "name": "Lire Fournisseurs olivier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Alerte olivier@ : nouveaux emails fournisseurs non lus (mémoire séparée)\nconst seen = $getWorkflowStaticData('global');\nseen.notifiedOlivier = seen.notifiedOlivier || {};\nconst data = $input.first().json;\nlet arr = Array.isArray(data) ? data : (data.emails || data.threads || data.result || []);\nlet flat = [];\nfor (const t of arr) { if (Array.isArray(t && t.messages)) flat.push(...t.messages); else flat.push(t); }\nconst out = [];\nfor (const e of flat) {\n  const id = String(e.id || e.email_id || '');\n  const sender = String(e.sender || e.from || '');\n  const unread = (e.read === false || e.read === 0 || e.is_read === false);\n  if (!id || seen.notifiedOlivier[id]) continue;\n  if (!unread) continue;\n  seen.notifiedOlivier[id] = true;\n  out.push({ json: {\n    to: 'louiscyrano@gmail.com',\n    subject: '\\ud83d\\udce7 Fournisseur [olivier@] : ' + (e.subject || '(sans objet)').slice(0, 90),\n    text: 'Nouvel email fournisseur de ' + (sender || '?') + ' sur la boîte olivier@orchidy.fr\\n\\nSujet : ' + (e.subject || '') + '\\n\\n\\u2192 Réponds dans l\\'app : https://agentic-inbox.louiscyrano.workers.dev'\n  }});\n}\nconst keys = Object.keys(seen.notifiedOlivier);\nif (keys.length > 2000) { for (const k of keys.slice(0, 1000)) delete seen.notifiedOlivier[k]; }\nreturn out;"
+      },
+      "id": "n-alerte-filter-olivier",
+      "name": "Filtrer fournisseurs olivier",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/olivier@orchidy.fr/emails?folder=inbox&page=1&limit=50&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n-alerte-inbox-olivier",
+      "name": "Lire Inbox olivier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Auto-classement olivier@ : déplace les emails fournisseurs restés dans l'inbox\nconst seen = $getWorkflowStaticData('global');\nseen.movedOlivier = seen.movedOlivier || {};\nconst data = $input.first().json;\nlet arr = Array.isArray(data) ? data : (data.emails || data.threads || data.result || []);\nlet flat = [];\nfor (const t of arr) { if (Array.isArray(t && t.messages)) flat.push(...t.messages); else flat.push(t); }\nconst SUPPLIERS = /prodigi|bigbuy|affilae|brickzone|orderchimp|imou|awin/i;\nconst out = [];\nfor (const e of flat) {\n  const id = String(e.id || '');\n  const sender = String(e.sender || e.from || '');\n  const folder = String(e.folder_id || e.folder || 'inbox');\n  if (!id || folder === 'fournisseurs') continue;\n  if (!SUPPLIERS.test(sender)) continue;\n  if (seen.movedOlivier[id]) continue;\n  out.push({ json: { emailId: id, sender } });\n  seen.movedOlivier[id] = Date.now();\n}\nconst week = 7 * 24 * 3600 * 1000;\nfor (const k of Object.keys(seen.movedOlivier)) if (Date.now() - seen.movedOlivier[k] > week) delete seen.movedOlivier[k];\nreturn out;"
+      },
+      "id": "n-alerte-detect-olivier",
+      "name": "Détecter à classer olivier",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/olivier@orchidy.fr/emails/{{ $json.emailId }}/move",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ folderId: 'Fournisseurs' }) }}",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n-alerte-move-olivier",
+      "name": "Déplacer olivier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        600
+      ]
+    }
+  ],
+  "connections": {
+    "Toutes les 15 min": {
+      "main": [
+        [
+          {
+            "node": "Lire la boîte",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Inbox brute",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Fournisseurs olivier",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Inbox olivier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire la boîte": {
+      "main": [
+        [
+          {
+            "node": "Filtrer fournisseurs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Envoyés",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrer fournisseurs": {
+      "main": [
+        [
+          {
+            "node": "M'alerter sur Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire Envoyés": {
+      "main": [
+        [
+          {
+            "node": "Détecter relances 3 jours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Détecter relances 3 jours": {
+      "main": [
+        [
+          {
+            "node": "M'alerter sur Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire Inbox brute": {
+      "main": [
+        [
+          {
+            "node": "Détecter fournisseurs à classer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Détecter fournisseurs à classer": {
+      "main": [
+        [
+          {
+            "node": "Déplacer vers Fournisseurs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrer fournisseurs olivier": {
+      "main": [
+        [
+          {
+            "node": "M'alerter sur Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Détecter à classer olivier": {
+      "main": [
+        [
+          {
+            "node": "Déplacer olivier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Europe/Paris"
+  }
+}

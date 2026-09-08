@@ -1,0 +1,165 @@
+{
+  "name": "📅 Résumé hebdo fournisseurs — Orchidy",
+  "active": true,
+  "nodes": [
+    {
+      "id": "n-weekly-trigger",
+      "name": "Lundi 08h00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -220,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-read-fournisseurs",
+      "name": "Lire Fournisseurs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails?folder=fournisseurs&page=1&limit=50&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "n-build-digest",
+      "name": "Construire résumé",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Fusionne les deux boîtes et agrège les 7 derniers jours par fournisseur.\nfunction parseList(d) {\n  let a = Array.isArray(d) ? d : (d.emails || d.threads || d.result || []);\n  let f = [];\n  for (const t of a) { if (Array.isArray(t && t.messages)) f.push(...t.messages); else f.push(t); }\n  return f;\n}\nconst louis = parseList($('Lire Fournisseurs').first().json).map(e => ({ ...e, _box: 'louis@orchidy.fr' }));\nconst olivier = parseList($('Lire Fournisseurs olivier').first().json).map(e => ({ ...e, _box: 'olivier@orchidy.fr' }));\nconst flat = [...louis, ...olivier];\nconst since = Date.now() - 7 * 24 * 3600 * 1000;\nconst bySupplier = {};\nfor (const e of flat) {\n  const d = new Date(e.date || e.received_at || 0).getTime();\n  if (d < since) continue;\n  const key = e._box + ' | ' + String(e.sender || e.from || '(inconnu)');\n  const g = bySupplier[key] || { count: 0, unread: 0, subjects: [], box: e._box };\n  g.count++;\n  if (!e.is_read) g.unread++;\n  g.subjects.push('- ' + (e.subject || '(sans objet)').slice(0, 100));\n  bySupplier[key] = g;\n}\nconst keys = Object.keys(bySupplier).sort();\nif (keys.length === 0) {\n  return [{ json: { empty: true, to: 'louiscyrano@gmail.com',\n    subject: '\\ud83d\\udcca Résumé hebdo fournisseurs — rien de nouveau',\n    text: 'Aucun email fournisseur reçu cette semaine (dossiers Fournisseurs des deux boîtes).\\n\\n— Orchidy Mail Agent' } }];\n}\nlet text = 'Récapitulatif de la semaine (dossiers Fournisseurs, boîtes louis@ et olivier@) :\\n';\nfor (const k of keys) {\n  const g = bySupplier[k];\n  text += '\\n\\ud83d\\udce9 [' + g.box + '] ' + k.split(' | ')[1] + ' — ' + g.count + ' email(s)' + (g.unread ? ' (' + g.unread + ' non lu(s))' : '') + '\\n';\n  text += g.subjects.join('\\n') + '\\n';\n}\ntext += '\\n— Orchidy Mail Agent';\nconst total = keys.reduce((a, k) => a + bySupplier[k].count, 0);\nreturn [{ json: { empty: false, to: 'louiscyrano@gmail.com',\n  subject: '\\ud83d\\udcca Résumé hebdo fournisseurs — ' + total + ' email(s) de ' + keys.length + ' fournisseur(s)',\n  text } }];"
+      }
+    },
+    {
+      "id": "n-send-digest",
+      "name": "Envoyer le résumé",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/louis@orchidy.fr/emails",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'louis@orchidy.fr', to: $json.to, subject: $json.subject, text: $json.text }) }}",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://agentic-inbox.louiscyrano.workers.dev/api/v1/mailboxes/olivier@orchidy.fr/emails?folder=fournisseurs&page=1&limit=50&threaded=false",
+        "options": {
+          "headers": {
+            "parameter": [
+              {
+                "name": "CF-Access-Client-Id",
+                "value": "__CF_ACCESS_CLIENT_ID__"
+              },
+              {
+                "name": "CF-Access-Client-Secret",
+                "value": "__CF_ACCESS_CLIENT_SECRET__"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n-read-fournisseurs-olivier",
+      "name": "Lire Fournisseurs olivier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Lundi 08h00": {
+      "main": [
+        [
+          {
+            "node": "Lire Fournisseurs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Lire Fournisseurs olivier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire Fournisseurs": {
+      "main": [
+        [
+          {
+            "node": "Construire résumé",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire résumé": {
+      "main": [
+        [
+          {
+            "node": "Envoyer le résumé",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}

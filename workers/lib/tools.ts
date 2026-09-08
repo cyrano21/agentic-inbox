@@ -27,8 +27,9 @@ import {
 	buildThreadingHeaders,
 } from "./email-helpers";
 import { verifyDraft } from "./ai";
+import { getLlmClient } from "./llm";
 import { sendEmail } from "../email-sender";
-import { Folders } from "../../shared/folders";
+import { Folders, slugifyFolderName } from "../../shared/folders";
 import type { Env } from "../types";
 
 // ── Type casts for DO methods not on the base stub type ────────────
@@ -57,13 +58,41 @@ export async function toolListEmails(
 	params: { folder: string; limit: number; page: number },
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	return stub.getEmails({
+	const emails = await stub.getEmails({
 		folder: params.folder,
 		limit: params.limit,
 		page: params.page,
 		sortColumn: "date",
 		sortDirection: "DESC",
 	});
+	// [FIX] An empty folder must be explicit for the model: a bare [] makes weaker
+	// models think the fetch failed and retry in a loop. Be instructive instead.
+	if (!Array.isArray(emails) || emails.length === 0) {
+		console.log(`TRACE list_emails folder=${params.folder} → EMPTY`);
+		return {
+			count: 0,
+			note: `No emails found in folder '${params.folder}'. The folder is empty. Report this to the user — do NOT call this tool again with the same arguments.`,
+		};
+	}
+	console.log(`TRACE list_emails folder=${params.folder} → ${emails.length} emails`);
+	return { count: emails.length, emails: emails.map(compactEmailForModel) };
+}
+
+/**
+ * Strip fields the model doesn't need (thread bookkeeping, recipient piles,
+ * raw body snippets) so tool results stay small: big outputs push reasoning
+ * models over their output budget before they write any text.
+ */
+function compactEmailForModel(e: Record<string, unknown>) {
+	return {
+		id: e.id,
+		subject: e.subject,
+		from: e.sender,
+		date: e.date,
+		read: e.read,
+		starred: e.starred,
+		folder: e.folder_id,
+	};
 }
 
 // ── get_email ──────────────────────────────────────────────────────
@@ -98,10 +127,18 @@ export async function toolSearchEmails(
 	params: { query: string; folder?: string },
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	return (stub as unknown as MailboxSearchStub).searchEmails({
+	const results = await (stub as unknown as MailboxSearchStub).searchEmails({
 		query: params.query,
 		folder: params.folder,
 	});
+	// [FIX] Same empty-result rationale as toolListEmails.
+	if (!Array.isArray(results) || results.length === 0) {
+		return {
+			count: 0,
+			note: `No emails match the query '${params.query}'${params.folder ? ` in folder '${params.folder}'` : ""}. Report this to the user — do NOT retry with the same arguments.`,
+		};
+	}
+	return { count: results.length, emails: results.map(compactEmailForModel) };
 }
 
 // ── draft_reply ────────────────────────────────────────────────────
@@ -136,7 +173,7 @@ export async function toolDraftReply(
 	// Verify/sanitize if requested
 	let processedBody = params.body.trim();
 	if (params.runVerifyDraft) {
-		const sanitized = await verifyDraft(env.AI, processedBody);
+		const sanitized = await verifyDraft(getLlmClient(env), processedBody);
 		if (!sanitized) {
 			return { error: "Draft verification failed — body could not be verified. Please try again." };
 		}
@@ -217,7 +254,7 @@ export async function toolDraftEmail(
 
 	let processedBody = params.body.trim();
 	if (params.runVerifyDraft) {
-		const sanitized = await verifyDraft(env.AI, processedBody);
+		const sanitized = await verifyDraft(getLlmClient(env), processedBody);
 		if (!sanitized) {
 			return { error: "Draft verification failed — body could not be verified. Please try again." };
 		}
@@ -294,7 +331,7 @@ export async function toolUpdateDraft(
 	// Verify the body BEFORE deleting the old draft to prevent data loss
 	const newDraftId = crypto.randomUUID();
 	const rawBody = params.bodyHtml ?? oldDraft.body ?? "";
-	const verifiedBody = await verifyDraft(env.AI, rawBody);
+	const verifiedBody = await verifyDraft(getLlmClient(env), rawBody);
 
 	if (!verifiedBody) {
 		return { error: "Draft verification failed — keeping existing draft unchanged. Please try again." };
@@ -338,6 +375,14 @@ export async function toolMarkEmailRead(
 	return { status: "updated", emailId, read };
 }
 
+// ── list_folders ───────────────────────────────────────────────────
+
+export async function toolListFolders(env: Env, mailboxId: string) {
+	const stub = getMailboxStub(env, mailboxId);
+	const folders = await stub.getFolders();
+	return { folders };
+}
+
 // ── move_email ─────────────────────────────────────────────────────
 
 export async function toolMoveEmail(
@@ -347,9 +392,21 @@ export async function toolMoveEmail(
 	folderId: string,
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	const success = await stub.moveEmail(emailId, folderId);
+	const raw = folderId.trim();
+	const slug = slugifyFolderName(raw);
+	if (!slug) {
+		return { error: "Invalid folder name (must contain alphanumeric characters)" };
+	}
+
+	// Custom folders are auto-created on first use (e.g. "Fournisseurs").
+	const folders = await stub.getFolders();
+	if (!folders.some((f) => f.id === slug)) {
+		await stub.createFolder(slug, raw, 1);
+	}
+
+	const success = await stub.moveEmail(emailId, slug);
 	if (success) {
-		return { status: "moved", emailId, folder: folderId };
+		return { status: "moved", emailId, folder: slug };
 	}
 	return { error: "Failed to move email" };
 }
@@ -422,7 +479,7 @@ export async function toolSendReply(
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
 	// Verify and append quoted original message
-	const sanitizedBody = await verifyDraft(env.AI, params.bodyHtml);
+	const sanitizedBody = await verifyDraft(getLlmClient(env), params.bodyHtml);
 	if (!sanitizedBody) {
 		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
 	}
@@ -493,7 +550,7 @@ export async function toolSendEmail(
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
-	const sanitizedBody = await verifyDraft(env.AI, params.bodyHtml);
+	const sanitizedBody = await verifyDraft(getLlmClient(env), params.bodyHtml);
 	if (!sanitizedBody) {
 		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
 	}

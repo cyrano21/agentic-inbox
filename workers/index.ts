@@ -19,7 +19,7 @@ import { SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
-import { requireMailbox, type MailboxContext } from "./lib/mailbox";
+import { readMailboxSettings, requireMailbox, type MailboxContext } from "./lib/mailbox";
 
 type AppContext = Context<MailboxContext>;
 
@@ -88,7 +88,14 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 app.get("/api/v1/config", (c) => {
 	const domainsRaw = c.env.DOMAINS || "";
 	const domains = domainsRaw.split(",").map((d) => d.trim()).filter(Boolean);
-	const emailAddresses = c.env.EMAIL_ADDRESSES ?? [];
+	// EMAIL_ADDRESSES may be a JSON array (wrangler vars) or a comma-separated string
+	// (--var CLI / dashboard override). Normalize both to an array.
+	const raw = c.env.EMAIL_ADDRESSES;
+	const emailAddresses = Array.isArray(raw)
+		? raw
+		: typeof raw === "string"
+			? raw.split(",").map((d) => d.trim()).filter(Boolean)
+			: [];
 	return c.json({ domains, emailAddresses });
 });
 
@@ -102,7 +109,12 @@ app.get("/api/v1/mailboxes", async (c) => {
 app.post("/api/v1/mailboxes", async (c) => {
 	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
 	const email = rawEmail.toLowerCase();
-	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
+	const allowedAddressesRaw = c.env.EMAIL_ADDRESSES;
+	const allowedAddresses = (Array.isArray(allowedAddressesRaw)
+		? allowedAddressesRaw
+		: typeof allowedAddressesRaw === "string"
+			? allowedAddressesRaw.split(",").map((d) => d.trim())
+			: []) as string[];
 	if (allowedAddresses.length > 0 && !allowedAddresses.map((a) => a.toLowerCase()).includes(email)) {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
 	}
@@ -118,9 +130,9 @@ app.post("/api/v1/mailboxes", async (c) => {
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
-	const obj = await c.env.BUCKET.get(`mailboxes/${mailboxId}.json`);
-	if (!obj) return c.json({ error: "Not found" }, 404);
-	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: await obj.json() });
+	// readMailboxSettings repairs a corrupted settings file instead of 500-ing
+	const settings = await readMailboxSettings(c.env.BUCKET, mailboxId);
+	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
 });
 
 app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -138,6 +150,46 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c) => {
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
 	return c.body(null, 204);
+});
+
+// -- Import .eml files (Zoho / Thunderbird export) ------------------
+// Multipart form: field "files" (repeatable, one .eml per file), optional
+// "folder" (default inbox). Dedup: the original Message-ID becomes the row id,
+// so re-importing the same file hits the PRIMARY KEY and is skipped.
+app.post("/api/v1/mailboxes/:mailboxId/import", async (c: AppContext) => {
+	const mailboxId = c.req.param("mailboxId")!;
+	if (!(await c.env.BUCKET.head(`mailboxes/${mailboxId}.json`))) return c.json({ error: "Not found" }, 404);
+	const form = await c.req.formData();
+	const files = form.getAll("files").filter((f): f is File => f instanceof File && f.size > 0);
+	const folder = String(form.get("folder") || Folders.INBOX);
+	if (files.length === 0) return c.json({ error: "No files uploaded (field 'files')" }, 400);
+	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(mailboxId));
+	let imported = 0, skipped = 0;
+	const errors: string[] = [];
+	for (const file of files) {
+		try {
+			const parsed = await new PostalMime().parse(await file.arrayBuffer());
+			const extractId = (s: string | undefined) => { if (!s) return null; const m = s.match(/<([^>]+)>/); return m ? m[1] : s.trim(); };
+			const originalMessageId = extractId(parsed.messageId);
+			const id = originalMessageId ?? crypto.randomUUID();
+			await retryOnDoReset(() => stub.createEmail(folder, {
+				id, subject: parsed.subject || "(no subject)",
+				sender: (parsed.from?.address || "unknown@imported").toLowerCase(),
+				recipient: (parsed.to || []).map((t) => t.address).filter(Boolean).join(", ") || mailboxId,
+				cc: null, bcc: null,
+				date: parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString(),
+				body: parsed.html || parsed.text || "",
+				in_reply_to: null, email_references: null,
+				thread_id: id, message_id: originalMessageId, raw_headers: JSON.stringify(parsed.headers),
+			}, []));
+			imported++;
+		} catch (e) {
+			const msg = (e as Error).message || String(e);
+			skipped++;
+			if (!/UNIQUE/i.test(msg) && errors.length < 5) errors.push(`${file.name}: ${msg}`);
+		}
+	}
+	return c.json({ imported, skipped, total: files.length, errors });
 });
 
 // -- Emails ---------------------------------------------------------
@@ -251,7 +303,14 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 
 app.post("/api/v1/mailboxes/:mailboxId/emails/:id/move", async (c: AppContext) => {
 	const { folderId } = (await c.req.json()) as { folderId: string };
-	const success = await c.var.mailboxStub.moveEmail(c.req.param("id")!, folderId);
+	const slug = slugify(folderId);
+	if (!slug) return c.json({ error: "Invalid folder name" }, 400);
+	// Custom folders are auto-created on first use (e.g. "Fournisseurs").
+	const folders = await c.var.mailboxStub.getFolders();
+	if (!folders.some((f: { id: string }) => f.id === slug)) {
+		await c.var.mailboxStub.createFolder(slug, folderId.trim(), 1);
+	}
+	const success = await c.var.mailboxStub.moveEmail(c.req.param("id")!, slug);
 	return success ? c.json({ status: "moved" }) : c.json({ error: "Folder not found" }, 400);
 });
 
@@ -345,13 +404,33 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
 	return result;
 }
 
+// [FIX] Durable Objects throw "reset because its code was updated" on the first access after each
+// deployment — a transient error: the DO re-initializes on the very next request. Retry once so the
+// first email after a deploy is not silently lost.
+const retryOnDoReset = async <T,>(fn: () => Promise<T>): Promise<T> => {
+	try { return await fn(); }
+	catch (e) {
+		if (/reset/i.test((e as Error).message || "")) {
+			console.log("DO reset detected — retrying once in 2s");
+			await new Promise((r) => setTimeout(r, 2000));
+			return await fn();
+		}
+		throw e;
+	}
+};
+
 async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
 
 	if (!parsedEmail.to?.length || !parsedEmail.to[0].address) throw new Error("received email with empty to");
 
-	const allowedAddresses = ((env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
+	const allowedAddressesRaw = (env.EMAIL_ADDRESSES ?? []) as string[] | string;
+	const allowedAddresses = (Array.isArray(allowedAddressesRaw)
+		? allowedAddressesRaw
+		: typeof allowedAddressesRaw === "string"
+			? allowedAddressesRaw.split(",").map((d) => d.trim())
+			: []).map((a) => a.toLowerCase());
 	const allRecipients = parsedEmail.to.map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
 	const ccRecipients = (parsedEmail.cc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 	const bccRecipients = (parsedEmail.bcc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
@@ -367,6 +446,45 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
 
 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+
+	// [03 — tri automatique] Heuristic pre-classification before storage:
+	// newsletters (List-Unsubscribe) → « Newsletters », machine notifications → « Notifications ».
+	const headerVal = (name: string): string => {
+		const h = (parsedEmail.headers as unknown as Array<{ key?: string; value?: string }> | undefined)?.find?.(
+			(hh) => hh.key?.toLowerCase() === name,
+		);
+		return typeof h?.value === "string" ? h.value : "";
+	};
+	const fromAddress = (parsedEmail.from?.address || "").toLowerCase();
+	let targetFolder: string = Folders.INBOX;
+	// [04 — tri fournisseurs] Known supplier senders → « Fournisseurs ».
+	// Matched on the sender domain so replies and notifications from the same
+	// suppliers land there too. Takes priority over newsletters/notifications:
+	// supplier campaigns belong with supplier conversations.
+	const fromDomain = fromAddress.split("@")[1] || "";
+	const SUPPLIER_TOKENS = ["prodigi", "bigbuy", "affilae", "brickzonehub", "orderchimp", "imou", "awin"];
+	if (SUPPLIER_TOKENS.some((t) => fromDomain.includes(t))) {
+		targetFolder = "fournisseurs";
+	} else if (headerVal("list-unsubscribe")) {
+		targetFolder = "newsletter";
+	} else if (/^(no-?reply|donotreply|notifications?|alert)@/.test(fromAddress) || /verification code|verify your email|code de vérification/i.test(parsedEmail.subject || "")) {
+		targetFolder = "notifications";
+	}
+	if (targetFolder !== Folders.INBOX) {
+		const FOLDER_NAMES: Record<string, string> = {
+			fournisseurs: "Fournisseurs",
+			newsletter: "Newsletters",
+			notifications: "Notifications",
+		};
+		const folderName = FOLDER_NAMES[targetFolder] || targetFolder;
+		try {
+			await retryOnDoReset(() => stub.createFolder(targetFolder, folderName, 0));
+			console.log(`Auto-classified email from ${fromAddress} → ${targetFolder}`);
+		} catch (e) {
+			console.log(`Folder ensure failed (${targetFolder}), falling back to inbox:`, (e as Error).message);
+			targetFolder = Folders.INBOX;
+		}
+	}
 
 	const attachmentData: StoredAttachment[] = [];
 	if (parsedEmail.attachments) {
@@ -386,27 +504,36 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	let threadId = emailReferences[0] || inReplyTo || messageId;
 
 	if (!inReplyTo && emailReferences.length === 0) {
-		const subjectThread = await (stub as any).findThreadBySubject(parsedEmail.subject || "", parsedEmail.from?.address || undefined);
-		if (subjectThread) threadId = subjectThread;
+		const subjectThread = await retryOnDoReset(() => (stub as any).findThreadBySubject(parsedEmail.subject || "", parsedEmail.from?.address || undefined));
+		if (subjectThread) threadId = String(subjectThread);
 	}
 
 	const originalMessageId = parsedEmail.messageId ? extractMsgId(parsedEmail.messageId) : null;
 
-	await stub.createEmail(Folders.INBOX, {
-		id: messageId, subject: parsedEmail.subject || "",
-		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
-		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
-		date: new Date().toISOString(), // uses receive time, not the email's Date header
-		body: parsedEmail.html || parsedEmail.text || "",
-		in_reply_to: inReplyTo, email_references: emailReferences.length > 0 ? JSON.stringify(emailReferences) : null,
-		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
-	}, attachmentData);
+	try {
+		await retryOnDoReset(() => stub.createEmail(targetFolder, {
+			id: messageId, subject: parsedEmail.subject || "",
+			sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
+			cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
+			date: new Date().toISOString(), // uses receive time, not the email's Date header
+			body: parsedEmail.html || parsedEmail.text || "",
+			in_reply_to: inReplyTo, email_references: emailReferences.length > 0 ? JSON.stringify(emailReferences) : null,
+			thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
+		}, attachmentData));
+	} catch (storeErr) {
+		console.error("Failed to store incoming email:", (storeErr as Error).message);
+		throw storeErr;
+	}
 
 	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
+	if (targetFolder !== Folders.INBOX) {
+		// Newsletters / notifications : pas de brouillon automatique de l'agent.
+		return;
+	}
 	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 		method: "POST", headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
 	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
 }
 
-export { app, receiveEmail };
+export { app, receiveEmail, retryOnDoReset };

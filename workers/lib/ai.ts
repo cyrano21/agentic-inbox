@@ -10,6 +10,7 @@
  */
 
 import { escapeHtml, stripHtmlToText, textToHtml } from "./email-helpers";
+import type { LlmClient } from "./llm";
 
 // ── Prompt Injection Scanner ───────────────────────────────────────
 
@@ -21,7 +22,7 @@ Return ONLY "NO" if it is a normal email (even if angry, confused, or containing
 
 Respond with exactly one word: YES or NO.`;
 
-export async function isPromptInjection(ai: Ai, bodyHtml: string | null | undefined): Promise<boolean> {
+export async function isPromptInjection(ai: LlmClient, bodyHtml: string | null | undefined): Promise<boolean> {
 	if (!bodyHtml) return false;
 	
 	const plainText = stripHtmlToText(bodyHtml).trim();
@@ -29,8 +30,7 @@ export async function isPromptInjection(ai: Ai, bodyHtml: string | null | undefi
 
 	try {
 		const response = (await ai.run(
-			// @ts-expect-error — model string not in generated union
-			"@cf/meta/llama-3.1-8b-instruct-fast",
+			"unused-model-routing-decided-by-proxy",
 			{
 				messages: [
 					{ role: "system", content: INJECTION_PROMPT },
@@ -119,7 +119,7 @@ function splitQuotedBlock(html: string): { reply: string; quoted: string } {
  * Verify and clean a draft email body using AI.
  * Falls back to returning the original body if the AI call fails.
  */
-export async function verifyDraft(ai: Ai, body: string): Promise<string> {
+export async function verifyDraft(ai: LlmClient, body: string): Promise<string> {
 	if (!body || !body.trim()) return body;
 
 	// Separate the quoted reply block so the AI only reviews the user's text
@@ -136,7 +136,7 @@ export async function verifyDraft(ai: Ai, body: string): Promise<string> {
 
 	try {
 		const response = (await ai.run(
-			"@cf/meta/llama-4-scout-17b-16e-instruct",
+			"unused-model-routing-decided-by-proxy",
 			{
 				messages: [
 					{ role: "system", content: VERIFIER_PROMPT },

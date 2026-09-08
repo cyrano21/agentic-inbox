@@ -4,7 +4,7 @@
 
 import { Badge, Button, Input, Loader, useKumoToastManager } from "@cloudflare/kumo";
 import { RobotIcon, ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { useMailbox, useUpdateMailbox } from "~/queries/mailboxes";
 
@@ -21,6 +21,9 @@ export default function SettingsRoute() {
 	const [displayName, setDisplayName] = useState("");
 	const [agentPrompt, setAgentPrompt] = useState("");
 	const [isSaving, setIsSaving] = useState(false);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [isImporting, setIsImporting] = useState(false);
+	const [importResult, setImportResult] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (mailbox) {
@@ -52,6 +55,43 @@ export default function SettingsRoute() {
 
 	const handleResetPrompt = () => {
 		setAgentPrompt("");
+	};
+
+	// Import .eml files (Zoho/Thunderbird export) in batches of 20 to stay under
+	// the Workers free-plan subrequest limit per request.
+	const handleImport = async (fileList: FileList | null) => {
+		if (!fileList || fileList.length === 0 || !mailboxId) return;
+		setIsImporting(true);
+		setImportResult(null);
+		const files = Array.from(fileList);
+		let imported = 0, skipped = 0;
+		const BATCH = 20;
+		try {
+			for (let i = 0; i < files.length; i += BATCH) {
+				const fd = new FormData();
+				fd.append("folder", "inbox");
+				for (const f of files.slice(i, i + BATCH)) fd.append("files", f);
+				const res = await fetch(`/api/v1/mailboxes/${encodeURIComponent(mailboxId)}/import`, {
+					method: "POST",
+					body: fd,
+				});
+				const json = await res.json().catch(() => ({})) as { error?: string; imported?: number; skipped?: number };
+				if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+				imported += json.imported ?? 0;
+				skipped += json.skipped ?? 0;
+			}
+			setImportResult(`${imported} imported · ${skipped} skipped (duplicates or errors)`);
+			toastManager.add({ title: `${imported} email(s) imported` });
+		} catch (e) {
+			toastManager.add({
+				title: "Import failed",
+				description: (e as Error).message,
+				variant: "error",
+			});
+		} finally {
+			setIsImporting(false);
+			if (fileInputRef.current) fileInputRef.current.value = "";
+		}
 	};
 
 	if (!mailbox) {
@@ -124,6 +164,38 @@ export default function SettingsRoute() {
 						The prompt is sent as the system message to the AI model.
 						It controls the agent's personality, writing style, and behavior rules.
 					</p>
+				</div>
+
+				{/* Import emails (.eml) */}
+				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">
+					<div className="text-sm font-medium text-kumo-default mb-2">
+						Import emails
+					</div>
+					<p className="text-xs text-kumo-subtle mb-3">
+						Import your old emails (Zoho, Gmail Takeout, Thunderbird export) as
+						.eml files into this mailbox's inbox. Duplicates (same Message-ID)
+						are skipped automatically, so you can re-run an import safely.
+					</p>
+					<input
+						ref={fileInputRef}
+						type="file"
+						accept=".eml,message/rfc822"
+						multiple
+						className="hidden"
+						onChange={(e) => handleImport(e.target.files)}
+					/>
+					<div className="flex items-center gap-3">
+						<Button
+							variant="secondary"
+							loading={isImporting}
+							onClick={() => fileInputRef.current?.click()}
+						>
+							Choose .eml files…
+						</Button>
+						{importResult && (
+							<span className="text-xs text-kumo-subtle">{importResult}</span>
+						)}
+					</div>
 				</div>
 
 				{/* Save */}

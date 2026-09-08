@@ -88,6 +88,35 @@ export function Layout({ children }: { children: React.ReactNode }) {
 					sizes="48x48 32x32 16x16"
 				/>
 				<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+				{/* Manifest inlined as a data URI: when the Cloudflare Access session
+				    expires, a fetch of /manifest.webmanifest gets redirected to the
+				    Access login page (cross-origin) and the browser blocks it with a
+				    confusing CORS error. A data URI needs no fetch at all. */}
+				<link
+					rel="manifest"
+					href={`data:application/manifest+json,${encodeURIComponent(JSON.stringify({
+						name: "Agentic Inbox",
+						short_name: "Inbox",
+						description: "Agentic email client with an AI agent for orchidy.fr",
+						start_url: "/",
+						scope: "/",
+						display: "standalone",
+						orientation: "portrait-primary",
+						background_color: "#f4f4f5",
+						theme_color: "#2563eb",
+						icons: [
+							{ src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+							{ src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+							{ src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+						],
+					}))}`}
+				/>
+				<meta name="theme-color" content="#2563eb" />
+				<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+				<meta name="apple-mobile-web-app-capable" content="yes" />
+				<meta name="mobile-web-app-capable" content="yes" />
+				<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+				<meta name="apple-mobile-web-app-title" content="Inbox" />
 				<title>Agentic Inbox</title>
 				<Meta />
 				<Links />

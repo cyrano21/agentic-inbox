@@ -5,4 +5,9 @@
 export interface Env extends Cloudflare.Env {
 	POLICY_AUD: string;
 	TEAM_DOMAIN: string;
+	// Local-dev proxy vars (set in .dev.vars, absent in production where the
+	// Workers AI fallback is used). Optional: llm.ts checks all three.
+	LLM_BASE_URL?: string;
+	LLM_API_KEY?: string;
+	LLM_MODEL?: string;
 }

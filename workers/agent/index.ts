@@ -9,7 +9,8 @@ import {
 	convertToModelMessages,
 	stepCountIs,
 } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import { getChatModelAsync, getLlmClient } from "../lib/llm";
+import { readMailboxSettings } from "../lib/mailbox";
 import { z } from "zod";
 import type { EmailFull, EmailMetadata } from "../lib/schemas";
 import { verifyDraft, isPromptInjection } from "../lib/ai";
@@ -20,6 +21,7 @@ import {
 } from "../lib/email-helpers";
 import {
 	toolListEmails,
+	toolListFolders,
 	toolGetEmail,
 	toolGetThread,
 	toolSearchEmails,
@@ -52,6 +54,22 @@ function defineTool(def: {
  */
 const DEFAULT_SYSTEM_PROMPT = `You are an email assistant that helps manage this inbox. You read emails, draft replies, and help organize conversations.
 
+## Identité (Orchidy)
+Tu es l'assistant e-mail personnel de Louis Olivier (Orchidy Marketplace, e-commerce / print-on-demand). Fournisseurs connus : Prodigi, BigBuy, Affliae, Brickzone Hub, Orderchimp, IMOU.
+Les newsletters et notifications sont déjà triées dans leurs dossiers — ne les mentionne que si Louis le demande.
+Pour un résumé des non-lus : liste expéditeur + objet + 1 ligne de résumé par e-mail, puis propose les actions (répondre, archiver).
+
+## Organisation des e-mails
+Quand Louis demande de ranger des e-mails (ex. « mets les mails de BigBuy dans un dossier Fournisseurs »), PROCÉDURE OBLIGATOIRE :
+1. Appelle d'abord list_emails (inbox) et/ou search_emails avec le nom de l'expéditeur pour trouver les e-mails concernés. NE RÉPONDS JAMAIS « aucun e-mail trouvé » sans avoir réellement listé ou cherché au préalable.
+2. Appelle ensuite move_email pour CHAQUE e-mail trouvé. Les dossiers personnalisés sont créés automatiquement s'ils n'existent pas — ne dis jamais que tu ne peux pas créer un dossier.
+3. Termine par une phrase récapitulant combien d'e-mails ont été déplacés et vers quel dossier.
+Utilise list_folders pour vérifier les dossiers existants si besoin.
+
+## Language (CRITICAL)
+Always answer the user in FRENCH (français), regardless of the language they use.
+Email drafts must be written in the language of the email you are replying to (a French email gets a French reply, an English email gets an English reply).
+
 ## Writing Style
 Write like a real person. Short, direct, flowing prose. Get to the point. Plain text only - no HTML tags in your replies.
 
@@ -62,6 +80,8 @@ Write like a real person. Short, direct, flowing prose. Get to the point. Plain 
 - Don't structure replies like a template or form letter. Just talk normally.
 
 **Agent Behavior Rules (CRITICAL):**
+- After using tools, ALWAYS answer the user in plain text. Tools gather information; your text answers the question.
+- If a tool returns no results (e.g. an empty folder), SAY SO in your answer. NEVER repeat the same tool call with identical arguments.
 - NEVER output meta-commentary about what you are doing (e.g. do not say "I am drafting a reply to Alex", "I checked the thread", etc).
 - When a new email arrives, your ONLY job is to call the \`draft_reply\` tool.
 - DO NOT summarize the email. DO NOT explain your actions.
@@ -90,16 +110,13 @@ Use discard_draft to delete drafts that the operator rejects or that are no long
 /**
  * Fetch the custom system prompt for a mailbox from its R2 settings.
  * Falls back to DEFAULT_SYSTEM_PROMPT if none is configured.
+ * Uses readMailboxSettings so a corrupted settings file can't break the agent.
  */
 async function getSystemPrompt(env: Env, mailboxId: string): Promise<string> {
 	try {
-		const key = `mailboxes/${mailboxId}.json`;
-		const obj = await env.BUCKET.get(key);
-		if (obj) {
-			const settings = await obj.json<Record<string, unknown>>();
-			if (typeof settings.agentSystemPrompt === "string" && settings.agentSystemPrompt.trim()) {
-				return settings.agentSystemPrompt;
-			}
+		const settings = await readMailboxSettings(env.BUCKET, mailboxId);
+		if (typeof settings.agentSystemPrompt === "string" && settings.agentSystemPrompt.trim()) {
+			return settings.agentSystemPrompt;
 		}
 	} catch {
 		// Fall through to default
@@ -128,6 +145,15 @@ function createEmailTools(env: Env, mailboxId: string) {
 			}),
 			execute: async ({ folder, limit, page }): Promise<unknown> => {
 				return toolListEmails(env, mailboxId, { folder, limit, page });
+			},
+		}),
+
+		list_folders: defineTool({
+			description:
+				"List all folders in the mailbox (system folders + custom folders). Use this to know which folders exist before moving emails, and to find where a conversation was filed.",
+			parameters: z.object({}),
+			execute: async (): Promise<unknown> => {
+				return toolListFolders(env, mailboxId);
 			},
 		}),
 
@@ -276,17 +302,39 @@ export class EmailAgent extends AIChatAgent<any> {
 	async onChatMessage(onFinish: any) {
 		const env = this.env as Env;
 		const mailboxId = this.name;
-		const workersai = createWorkersAI({ binding: env.AI });
 		const tools = createEmailTools(env, mailboxId);
 		const systemPrompt = await getSystemPrompt(env, mailboxId);
 
 		const result = streamText({
-			model: workersai("@cf/moonshotai/kimi-k2.5"),
+			model: await getChatModelAsync(env),
 			system: systemPrompt,
 			messages: await convertToModelMessages(this.messages),
 			tools,
-			stopWhen: stepCountIs(5),
-			onFinish,
+			maxOutputTokens: 8192,
+			stopWhen: stepCountIs(10),
+			onFinish: (finishResult: any) => {
+				// [TRACE] full trace in the worker logs so any loop/dead-end is readable
+				try {
+					const allToolCalls = (finishResult.steps || []).flatMap((s: any) => (s.toolCalls || []).map((t: any) => t.toolName));
+					console.log("AGENT onFinish:", JSON.stringify({
+						steps: finishResult.steps?.length ?? 0,
+						finishReason: finishResult.finishReason,
+						toolCalls: allToolCalls,
+						textLength: (finishResult.text || "").length,
+						textPreview: (finishResult.text || "").slice(0, 120),
+					}));
+					// Per-step content types: shows whether the model emitted reasoning/
+					// text on the final step or stopped silently after tool results.
+					for (const [i, s] of (finishResult.steps || []).entries()) {
+						console.log(`AGENT step ${i + 1}:`, JSON.stringify({
+							finishReason: s.finishReason,
+							contentTypes: (s.content || []).map((c: any) => c.type),
+							preview: (s.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join(" ").slice(0, 150),
+						}));
+					}
+				} catch { /* tracing must never break the agent */ }
+				onFinish?.(finishResult);
+			},
 		});
 
 		return result.toUIMessageStreamResponse();
@@ -298,7 +346,7 @@ export class EmailAgent extends AIChatAgent<any> {
 	 */
 	async onRequest(request: Request): Promise<Response> {
 		const url = new URL(request.url);
-		if (url.pathname === "/onNewEmail" && request.method === "POST") {
+		if (url.pathname.endsWith("/onNewEmail") && request.method === "POST") {
 			try {
 				const emailData = await request.json() as {
 					mailboxId: string;
@@ -334,7 +382,6 @@ export class EmailAgent extends AIChatAgent<any> {
 		threadId: string;
 	}) {
 		const env = this.env as Env;
-		const workersai = createWorkersAI({ binding: env.AI });
 		const tools = createEmailTools(env, emailData.mailboxId);
 		const systemPrompt = await getSystemPrompt(env, emailData.mailboxId);
 
@@ -347,7 +394,7 @@ export class EmailAgent extends AIChatAgent<any> {
 		try {
 			const email = (await stub.getEmail(emailData.emailId)) as EmailFull | null;
 			if (email?.body) {
-				const isInjection = await isPromptInjection(env.AI, email.body);
+				const isInjection = await isPromptInjection(getLlmClient(env), email.body);
 				if (isInjection) {
 					console.warn("Skipping auto-draft due to detected prompt injection:", emailData.emailId);
 					
@@ -395,7 +442,7 @@ export class EmailAgent extends AIChatAgent<any> {
 			// could plant an injection in an earlier email in the thread
 			// that gets included in the agent's prompt.
 			if (threadContext) {
-				const threadInjection = await isPromptInjection(env.AI, threadContext);
+				const threadInjection = await isPromptInjection(getLlmClient(env), threadContext);
 				if (threadInjection) {
 					console.warn("Skipping auto-draft due to prompt injection in thread context:", emailData.threadId);
 					const newMessages = [
@@ -463,12 +510,24 @@ Based on the email content and thread context above, draft a reply using draft_r
 
 		try {
 			const result = await generateText({
-				model: workersai("@cf/moonshotai/kimi-k2.5"),
+				model: await getChatModelAsync(env),
 				system: systemPrompt,
 				messages: await convertToModelMessages(messages),
 				tools,
-				stopWhen: stepCountIs(5),
+				maxOutputTokens: 8192,
+				stopWhen: stepCountIs(10),
 			});
+
+			// [TRACE] diagnostic of what the model actually did
+			try {
+				console.log("AGENT auto-draft trace:", JSON.stringify({
+					steps: result.steps.length,
+					finishReason: result.finishReason,
+					toolCalls: result.steps.flatMap((s: any) => (s.toolCalls || []).map((t: any) => t.toolName)),
+					toolResults: result.steps.flatMap((s: any) => (s.toolResults || []).map((t: any) => ({ tool: t.toolName, ok: !t.result?.error }))),
+					text: (result.text || "").slice(0, 200),
+				}));
+			} catch { /* tracing must never break the agent */ }
 
 			// Check if draft_reply was called (saves to Drafts as side effect).
 			// If NOT, save the agent's text response as a draft directly.
@@ -478,7 +537,7 @@ Based on the email content and thread context above, draft a reply using draft_r
 
 			if (!draftToolCalled && result.text.trim()) {
 				// Model generated a draft inline as text -- verify with AI
-				const sanitizedText = await verifyDraft(env.AI, result.text.trim());
+				const sanitizedText = await verifyDraft(getLlmClient(env), result.text.trim());
 				if (!sanitizedText) {
 					// Inline text was entirely agent commentary, skip
 				} else {

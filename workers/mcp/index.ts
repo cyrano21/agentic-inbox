@@ -18,6 +18,7 @@ import {
 	toolSendReply,
 	toolSendEmail,
 	toolMarkEmailRead,
+	toolListFolders,
 	toolMoveEmail,
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
@@ -396,6 +397,21 @@ export class EmailMCP extends McpAgent<Env> {
 				const denied = await verifyMailbox(mailboxId);
 				if (denied) return denied;
 				const result = await toolMarkEmailRead(env, mailboxId, emailId, read);
+				return mcpText(result);
+			},
+		);
+
+		// ── list_folders ───────────────────────────────────────────
+		this.server.tool(
+			"list_folders",
+			"List all folders in a mailbox (system folders + custom folders). Use this to know which folders exist before moving emails.",
+			{
+				mailboxId: z.string().describe("The mailbox email address"),
+			},
+			async ({ mailboxId }) => {
+				const denied = await verifyMailbox(mailboxId);
+				if (denied) return denied;
+				const result = await toolListFolders(env, mailboxId);
 				return mcpText(result);
 			},
 		);

@@ -9,12 +9,33 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	// Delete stale server-side vars no longer in this file (e.g. old LLM_* proxy vars).
+	"keep_vars": false,
 	"vars": {
 		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
-		"DOMAINS": "example.com",
-		"EMAIL_ADDRESSES": []
+		"DOMAINS": "orchidy.fr",
+		"EMAIL_ADDRESSES": "louis@orchidy.fr,olivier@orchidy.fr",
+		// LLM routing: in LOCAL DEV, put LLM_BASE_URL/LLM_API_KEY/LLM_MODEL in
+		// .dev.vars (gitignored) to route agent AI through the OpenCodex proxy
+		// (127.0.0.1:10100, combo/auto = auto-failover). In PRODUCTION the Worker
+		// cannot reach localhost, so when those vars are absent the LLM facade in
+		// workers/lib/llm.ts falls back to the Workers AI binding below.
+		// NOTE: Kimi K2.x / GLM-5.x flagship are PAID-tier on Workers AI (AiError 5035 on
+		// the Free plan). Primary model = free tier; llm.ts falls back automatically if
+		// availability changes. Switch back to @cf/moonshotai/kimi-k2.5 after upgrading.
+		// gpt-oss-20b is a reasoning model: after large tool results it could end its
+		// turn inside the reasoning channel without emitting text — mitigated by the
+		// compacted tool results in tools.ts + maxOutputTokens 8192. (Observed in
+		// prod: llama-3.3 passes placeholder strings as tool args; glm-4.7 also fine
+		// but keep gpt-oss primary — proven longest here. Daily free-tier quota can
+		// make ALL models report "unavailable" until it resets.)
+		"LLM_WORKERS_AI_MODEL": "@cf/openai/gpt-oss-20b",
+		"SUMMARY_TO": "louiscyrano@gmail.com"
+	},
+	"triggers": {
+		"crons": ["0 7 * * *"]
 	},
 	"send_email": [
 		{

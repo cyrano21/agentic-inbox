@@ -48,11 +48,23 @@ export const FOLDER_DISPLAY_NAMES: Record<string, string> = {
 
 /** Formatted string for tool parameter descriptions (agent + MCP). */
 export const FOLDER_TOOL_DESCRIPTION =
-	"Folder to list: inbox, sent, draft, archive, trash";
+	"Folder to list: inbox, sent, draft, archive, trash, or any custom folder name (e.g. 'Fournisseurs', 'Clients').";
 
 /** Formatted string for move-email tool descriptions. */
 export const MOVE_FOLDER_TOOL_DESCRIPTION =
-	"Target folder: inbox, sent, draft, archive, trash";
+	"Target folder: inbox, sent, draft, archive, trash, or ANY new folder name (e.g. 'Fournisseurs', 'Clients') — the folder is created automatically if it doesn't exist yet. Use list_folders to see existing folders.";
+
+/**
+ * Normalize a folder name into its canonical ID (lowercase, dashes,
+ * alphanumeric only). Returns "" for non-alphanumeric input.
+ * Shared by the API routes and the agent/MCP tools so every path
+ * resolves a folder name the same way.
+ */
+export function slugifyFolderName(text: string): string {
+	return text.toString().toLowerCase()
+		.replace(/\s+/g, "-").replace(/[^\w-]+/g, "")
+		.replace(/--+/g, "-").replace(/^-+/, "").replace(/-+$/, "");
+}
 
 /**
  * Look up a display name for a folder ID, falling back to the raw ID
